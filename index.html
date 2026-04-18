@@ -1,0 +1,637 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+  <title>IrrigValve</title>
+  <meta name="theme-color" content="#0D9488" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="IrrigValve" />
+  <meta name="description" content="SSCO Smart Irrigation Valve — setup and monitoring." />
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body { background:#F0F4F3; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; -webkit-tap-highlight-color:transparent; }
+    @keyframes fadeIn { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:translateY(0)} }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+    @keyframes spin { to{transform:rotate(360deg)} }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+
+  <script type="text/babel">
+    const { useState, useEffect, useCallback, useRef } = React;
+
+    // ─── Supabase Config ───────────────────────────────────────
+    const SUPABASE_URL  = "https://emztgbwabaulhlppkihh.supabase.co";
+    const SUPABASE_KEY  = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVtenRnYndhYmF1bGhscHBraWhoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYzNjQ5MTYsImV4cCI6MjA5MTk0MDkxNn0.jD9NCOc9Kc9Sb49J1TyNyNP7lejEh8XHBDj52qMmJVs";
+
+    // ─── Colors ─────────────────────────────────────────────────
+    const C = {
+      bg:"#F0F4F3", card:"#FFFFFF", primary:"#0D9488", primaryL:"#CCFBF1",
+      blue:"#3B82F6", green:"#10B981", red:"#EF4444", orange:"#F59E0B",
+      grey:"#94A3B8", greyL:"#E2E8F0", dark:"#1E293B", darkM:"#334155", white:"#FFFFFF",
+      border:"#E2E8F0",
+    };
+
+    // ─── Supabase REST helpers ──────────────────────────────────
+    function supabaseHeaders(token) {
+      const h = { "apikey": SUPABASE_KEY, "Content-Type": "application/json" };
+      if (token) h["Authorization"] = `Bearer ${token}`;
+      return h;
+    }
+
+    async function supabaseAuth(action, email, password) {
+      const url = `${SUPABASE_URL}/auth/v1/${action}`;
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "apikey": SUPABASE_KEY, "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error_description || data.msg || data.error || "Auth failed");
+      return data;
+    }
+
+    async function supabaseRPC(fnName, payload, token) {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/${fnName}`, {
+        method: "POST",
+        headers: supabaseHeaders(token),
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || data.detail || "Request failed");
+      return data;
+    }
+
+    async function supabaseQuery(table, query, token) {
+      const res = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${query}`, {
+        headers: { ...supabaseHeaders(token), "Prefer": "return=representation" }
+      });
+      return await res.json();
+    }
+
+    // ─── Components ─────────────────────────────────────────────
+    function Card({ children, style }) {
+      return React.createElement("div", {
+        style: { background:C.card, borderRadius:16, padding:16, marginBottom:12,
+          boxShadow:"0 1px 3px rgba(0,0,0,0.06)", ...style }
+      }, children);
+    }
+
+    function Button({ children, onClick, color, disabled, style }) {
+      return React.createElement("button", {
+        onClick, disabled,
+        style: { width:"100%", padding:14, borderRadius:12, border:"none",
+          backgroundColor: disabled ? C.greyL : (color || C.primary),
+          color: disabled ? C.grey : C.white,
+          fontSize:15, fontWeight:600, cursor: disabled?"default":"pointer",
+          opacity: disabled ? 0.7 : 1, ...style }
+      }, children);
+    }
+
+    function Input({ value, onChange, placeholder, type, style }) {
+      return React.createElement("input", {
+        type: type || "text", value, placeholder,
+        onChange: e => onChange(e.target.value),
+        style: { width:"100%", padding:"12px 14px", borderRadius:10,
+          border:`1px solid ${C.border}`, fontSize:15, outline:"none",
+          marginBottom:10, ...style }
+      });
+    }
+
+    function Spinner() {
+      return React.createElement("div", {
+        style: { width:20, height:20, border:`3px solid ${C.greyL}`,
+          borderTop:`3px solid ${C.primary}`, borderRadius:"50%",
+          animation:"spin 0.8s linear infinite", display:"inline-block", verticalAlign:"middle" }
+      });
+    }
+
+    // ─── Landing Screen (from NFC/QR) ───────────────────────────
+    function LandingScreen({ mac, onCloud, onLocal }) {
+      return React.createElement("div", { style: { maxWidth:420, margin:"0 auto", padding:20, paddingTop:60 } },
+        React.createElement("div", { style: { textAlign:"center", marginBottom:40 } },
+          React.createElement("div", { style: { fontSize:48, marginBottom:8 } }, "\uD83C\uDF31"),
+          React.createElement("h1", { style: { fontSize:24, color:C.dark, marginBottom:8 } }, "IrrigValve"),
+          React.createElement("p", { style: { color:C.grey, fontSize:14 } }, "SSCO Smart Irrigation Valve"),
+          mac && React.createElement("p", { style: { color:C.grey, fontSize:12, marginTop:8, fontFamily:"monospace" } },
+            `Device: ${mac}`)
+        ),
+        React.createElement(Card, null,
+          React.createElement("h2", { style: { fontSize:17, color:C.dark, marginBottom:8 } }, "Enable cloud features?"),
+          React.createElement("p", { style: { fontSize:13, color:C.grey, lineHeight:1.5, marginBottom:16 } },
+            "Cloud features let you monitor your garden from anywhere, view historical data, get AI watering suggestions, and manage multiple valves from one account."),
+          React.createElement(Button, { onClick: onCloud, style: { marginBottom:10 } }, "Yes \u2014 Create Account"),
+          React.createElement(Button, { onClick: onLocal, color: C.greyL, style: { color: C.dark } }, "No \u2014 Local Only")
+        )
+      );
+    }
+
+    // ─── Auth Screen ────────────────────────────────────────────
+    function AuthScreen({ mac, onAuth }) {
+      const [mode, setMode] = useState("signup"); // signup | signin
+      const [email, setEmail] = useState("");
+      const [password, setPassword] = useState("");
+      const [error, setError] = useState("");
+      const [loading, setLoading] = useState(false);
+      const [confirmMsg, setConfirmMsg] = useState("");
+
+      const submit = async () => {
+        setError(""); setConfirmMsg(""); setLoading(true);
+        try {
+          if (mode === "signup") {
+            const data = await supabaseAuth("signup", email, password);
+            if (data.access_token) {
+              // Auto-confirmed (or email confirm disabled)
+              onAuth(data.access_token, data.user);
+            } else {
+              // Email confirmation required
+              setConfirmMsg("Check your email for a confirmation link, then sign in.");
+              setMode("signin");
+            }
+          } else {
+            const data = await supabaseAuth("token?grant_type=password", email, password);
+            onAuth(data.access_token, data.user);
+          }
+        } catch(e) {
+          setError(e.message);
+        }
+        setLoading(false);
+      };
+
+      return React.createElement("div", { style: { maxWidth:420, margin:"0 auto", padding:20, paddingTop:60 } },
+        React.createElement("div", { style: { textAlign:"center", marginBottom:30 } },
+          React.createElement("div", { style: { fontSize:36, marginBottom:8 } }, "\uD83C\uDF31"),
+          React.createElement("h1", { style: { fontSize:22, color:C.dark } },
+            mode === "signup" ? "Create Account" : "Sign In")
+        ),
+        confirmMsg && React.createElement("div", {
+          style: { background:"#ECFDF5", border:`1px solid ${C.green}`, borderRadius:10,
+            padding:12, marginBottom:16, fontSize:13, color:C.dark }
+        }, confirmMsg),
+        React.createElement(Card, null,
+          React.createElement(Input, { value:email, onChange:setEmail, placeholder:"Email", type:"email" }),
+          React.createElement(Input, { value:password, onChange:setPassword, placeholder:"Password (min 6 chars)", type:"password" }),
+          error && React.createElement("p", { style: { color:C.red, fontSize:12, marginBottom:10 } }, error),
+          React.createElement(Button, { onClick:submit, disabled:loading || !email || password.length < 6 },
+            loading ? React.createElement(Spinner) : (mode === "signup" ? "Create Account" : "Sign In")),
+          React.createElement("p", {
+            onClick: () => { setMode(mode === "signup" ? "signin" : "signup"); setError(""); },
+            style: { textAlign:"center", marginTop:14, fontSize:13, color:C.primary, cursor:"pointer" }
+          }, mode === "signup" ? "Already have an account? Sign in" : "Need an account? Sign up")
+        )
+      );
+    }
+
+    // ─── Add Node Screen ────────────────────────────────────────
+    function AddNodeScreen({ token, mac: urlMac, onDone, onCancel }) {
+      const [step, setStep] = useState(urlMac ? "confirm" : "scan");
+      const [mac, setMac] = useState(urlMac || "");
+      const [nodeIp, setNodeIp] = useState("");
+      const [name, setName] = useState("My Valve");
+      const [loading, setLoading] = useState(false);
+      const [error, setError] = useState("");
+      const [deviceInfo, setDeviceInfo] = useState(null);
+
+      // If we have a MAC from URL, try to discover the device on LAN
+      useEffect(() => {
+        if (urlMac && step === "confirm") {
+          // Try common discovery: mDNS or known IP pattern
+          // For now, ask user for IP
+        }
+      }, [urlMac]);
+
+      const discoverDevice = async (ip) => {
+        setError(""); setLoading(true);
+        try {
+          const baseUrl = ip.startsWith("http") ? ip : `http://${ip}`;
+          const res = await fetch(`${baseUrl}/api/device-info`, { signal: AbortSignal.timeout(5000) });
+          if (!res.ok) throw new Error("Device not responding");
+          const info = await res.json();
+          setDeviceInfo(info);
+          setMac(info.device_mac);
+          setName(info.friendly_name || "My Valve");
+          setStep("confirm");
+        } catch(e) {
+          setError("Could not connect to device. Check the IP and make sure you're on the same WiFi network.");
+        }
+        setLoading(false);
+      };
+
+      const registerNode = async () => {
+        setError(""); setLoading(true);
+        try {
+          // Get GPS from browser (HTTPS = geolocation works!)
+          let lat = null, lon = null, elev = null;
+          if (navigator.geolocation) {
+            try {
+              const pos = await new Promise((resolve, reject) =>
+                navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy:true, timeout:8000 })
+              );
+              lat = pos.coords.latitude;
+              lon = pos.coords.longitude;
+              elev = pos.coords.altitude || 0;
+            } catch(e) { /* GPS optional */ }
+          }
+
+          // Register node in Supabase via database RPC function
+          const rpcRes = await fetch(`${SUPABASE_URL}/rest/v1/rpc/register_node`, {
+            method: "POST",
+            headers: supabaseHeaders(token),
+            body: JSON.stringify({
+              p_device_mac: mac,
+              p_friendly_name: name,
+              p_latitude: lat,
+              p_longitude: lon,
+              p_elevation_m: elev,
+            })
+          });
+          const result = await rpcRes.json();
+          if (!rpcRes.ok) throw new Error(result.message || result.error || "Registration failed");
+          if (result.error) throw new Error(result.error);
+
+          // If we have the device IP, push GPS to the ESP32
+          if (nodeIp && lat != null) {
+            try {
+              const baseUrl = nodeIp.startsWith("http") ? nodeIp : `http://${nodeIp}`;
+              await fetch(`${baseUrl}/api/location`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ latitude: lat, longitude: lon, elevation_m: elev })
+              });
+            } catch(e) { /* non-critical */ }
+          }
+
+          onDone(result);
+        } catch(e) {
+          setError(e.message);
+        }
+        setLoading(false);
+      };
+
+      return React.createElement("div", { style: { maxWidth:420, margin:"0 auto", padding:20, paddingTop:40 } },
+        React.createElement("div", { style: { display:"flex", alignItems:"center", marginBottom:24 } },
+          React.createElement("span", {
+            onClick: onCancel,
+            style: { fontSize:20, cursor:"pointer", marginRight:12, color:C.grey }
+          }, "\u2190"),
+          React.createElement("h2", { style: { fontSize:20, color:C.dark } }, "Add Node")
+        ),
+
+        // Step: Scan / Enter IP
+        step === "scan" && React.createElement(Card, null,
+          React.createElement("p", { style: { fontSize:14, color:C.dark, marginBottom:4, fontWeight:600 } }, "Connect to your valve"),
+          React.createElement("p", { style: { fontSize:13, color:C.grey, marginBottom:16, lineHeight:1.5 } },
+            "Enter the valve's IP address. You can find it in your router's connected devices, or check the valve's display."),
+          React.createElement(Input, {
+            value: nodeIp, onChange: setNodeIp,
+            placeholder: "e.g. 192.168.1.228"
+          }),
+          error && React.createElement("p", { style: { color:C.red, fontSize:12, marginBottom:10 } }, error),
+          React.createElement(Button, {
+            onClick: () => discoverDevice(nodeIp),
+            disabled: loading || !nodeIp
+          }, loading ? React.createElement(Spinner) : "Connect"),
+          React.createElement("div", { style: { textAlign:"center", margin:"16px 0", fontSize:12, color:C.grey } }, "— or —"),
+          React.createElement("p", { style: { fontSize:13, color:C.grey, marginBottom:8 } },
+            "Tap the NFC tag on your valve, or enter the MAC address manually:"),
+          React.createElement(Input, {
+            value: mac, onChange: setMac,
+            placeholder: "MAC address (e.g. 3C:61:05:0D:6A:5C)",
+            style: { fontFamily:"monospace" }
+          }),
+          mac.length >= 17 && React.createElement(Button, {
+            onClick: () => setStep("confirm"),
+            color: C.blue, style: { marginTop:4 }
+          }, "Use this MAC")
+        ),
+
+        // Step: Confirm & Register
+        step === "confirm" && React.createElement(Card, null,
+          React.createElement("p", { style: { fontSize:14, color:C.dark, marginBottom:12, fontWeight:600 } }, "Confirm registration"),
+          React.createElement("div", { style: { background:C.bg, borderRadius:10, padding:12, marginBottom:16 } },
+            React.createElement("div", { style: { fontSize:12, color:C.grey } }, "MAC Address"),
+            React.createElement("div", { style: { fontSize:15, fontFamily:"monospace", color:C.dark, marginBottom:8 } }, mac),
+            deviceInfo && React.createElement(React.Fragment, null,
+              React.createElement("div", { style: { fontSize:12, color:C.grey, marginTop:4 } }, "Firmware"),
+              React.createElement("div", { style: { fontSize:14, color:C.dark } },
+                `${deviceInfo.firmware_version} (${deviceInfo.board})`)
+            )
+          ),
+          React.createElement("div", { style: { fontSize:12, color:C.grey, marginBottom:4 } }, "Node name"),
+          React.createElement(Input, { value: name, onChange: setName, placeholder: "My Valve" }),
+          error && React.createElement("p", { style: { color:C.red, fontSize:12, marginBottom:10 } }, error),
+          React.createElement(Button, {
+            onClick: registerNode, disabled: loading || !mac
+          }, loading ? React.createElement(Spinner) : "Register Node"),
+          React.createElement("p", { style: { fontSize:11, color:C.grey, marginTop:10, textAlign:"center" } },
+            "Your phone's GPS will be used to set the valve's location.")
+        )
+      );
+    }
+
+    // ─── Node Card (dashboard) ──────────────────────────────────
+    function NodeCard({ node, onClick }) {
+      const lastSeen = node.last_seen_at
+        ? `Last sync: ${new Date(node.last_seen_at).toLocaleString()}`
+        : "Never synced";
+
+      return React.createElement("div", {
+        onClick,
+        style: { background:C.card, borderRadius:16, padding:16, marginBottom:12,
+          boxShadow:"0 1px 3px rgba(0,0,0,0.06)", cursor:"pointer",
+          animation:"fadeIn 0.3s ease" }
+      },
+        React.createElement("div", { style: { display:"flex", justifyContent:"space-between", alignItems:"center" } },
+          React.createElement("div", null,
+            React.createElement("div", { style: { fontSize:16, fontWeight:600, color:C.dark } },
+              node.friendly_name || "My Valve"),
+            React.createElement("div", { style: { fontSize:12, color:C.grey, marginTop:2 } },
+              node.device_mac),
+            React.createElement("div", { style: { fontSize:11, color:C.grey, marginTop:2 } }, lastSeen)
+          ),
+          React.createElement("div", {
+            style: { width:10, height:10, borderRadius:5,
+              backgroundColor: node.is_online ? C.green : C.grey }
+          })
+        )
+      );
+    }
+
+    // ─── Node Detail Screen ─────────────────────────────────────
+    function NodeDetailScreen({ node, token, onBack }) {
+      const [readings, setReadings] = useState([]);
+      const [events, setEvents] = useState([]);
+      const [loading, setLoading] = useState(true);
+
+      useEffect(() => {
+        loadData();
+      }, [node.id]);
+
+      const loadData = async () => {
+        setLoading(true);
+        try {
+          const [r, e] = await Promise.all([
+            supabaseQuery("sensor_readings",
+              `node_id=eq.${node.id}&order=recorded_at.desc&limit=20`, token),
+            supabaseQuery("watering_events",
+              `node_id=eq.${node.id}&order=started_at.desc&limit=10`, token)
+          ]);
+          setReadings(Array.isArray(r) ? r : []);
+          setEvents(Array.isArray(e) ? e : []);
+        } catch(e) { console.error(e); }
+        setLoading(false);
+      };
+
+      const latestReading = readings[0];
+
+      return React.createElement("div", { style: { maxWidth:420, margin:"0 auto", padding:20, paddingTop:20 } },
+        React.createElement("div", { style: { display:"flex", alignItems:"center", marginBottom:20 } },
+          React.createElement("span", {
+            onClick: onBack, style: { fontSize:20, cursor:"pointer", marginRight:12, color:C.grey }
+          }, "\u2190"),
+          React.createElement("div", null,
+            React.createElement("h2", { style: { fontSize:20, color:C.dark } }, node.friendly_name),
+            React.createElement("p", { style: { fontSize:12, color:C.grey } }, node.device_mac)
+          )
+        ),
+
+        // Current Status
+        React.createElement(Card, null,
+          React.createElement("div", { style: { fontSize:14, fontWeight:600, color:C.dark, marginBottom:12 } }, "Current Status"),
+          latestReading ? React.createElement("div", { style: { display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 } },
+            React.createElement("div", { style: { background:C.bg, borderRadius:10, padding:12, textAlign:"center" } },
+              React.createElement("div", { style: { fontSize:24, fontWeight:700, color:C.primary } },
+                `${latestReading.soil_moisture_pct?.toFixed(0) ?? "--"}%`),
+              React.createElement("div", { style: { fontSize:11, color:C.grey } }, "Moisture")
+            ),
+            React.createElement("div", { style: { background:C.bg, borderRadius:10, padding:12, textAlign:"center" } },
+              React.createElement("div", { style: { fontSize:24, fontWeight:700, color:C.orange } },
+                `${latestReading.temperature_c?.toFixed(1) ?? "--"}\u00B0`),
+              React.createElement("div", { style: { fontSize:11, color:C.grey } }, "Temp \u00B0C")
+            ),
+            React.createElement("div", { style: { background:C.bg, borderRadius:10, padding:12, textAlign:"center" } },
+              React.createElement("div", { style: { fontSize:24, fontWeight:700, color:C.blue } },
+                `${latestReading.battery_voltage?.toFixed(1) ?? "--"}V`),
+              React.createElement("div", { style: { fontSize:11, color:C.grey } }, "Battery")
+            ),
+            React.createElement("div", { style: { background:C.bg, borderRadius:10, padding:12, textAlign:"center" } },
+              React.createElement("div", { style: { fontSize:24, fontWeight:700, color: latestReading.valve_open ? C.green : C.grey } },
+                latestReading.valve_open ? "OPEN" : "Closed"),
+              React.createElement("div", { style: { fontSize:11, color:C.grey } }, "Valve")
+            )
+          ) : React.createElement("p", { style: { color:C.grey, fontSize:13 } },
+            loading ? "Loading..." : "No readings yet. Data appears after the first cloud sync.")
+        ),
+
+        // Location
+        node.latitude && React.createElement(Card, null,
+          React.createElement("div", { style: { fontSize:14, fontWeight:600, color:C.dark, marginBottom:4 } }, "Location"),
+          React.createElement("p", { style: { fontSize:13, color:C.grey } },
+            `${node.latitude?.toFixed(5)}, ${node.longitude?.toFixed(5)}`)
+        ),
+
+        // Recent Readings
+        readings.length > 0 && React.createElement(Card, null,
+          React.createElement("div", { style: { fontSize:14, fontWeight:600, color:C.dark, marginBottom:12 } },
+            `Recent Readings (${readings.length})`),
+          React.createElement("div", { style: { maxHeight:200, overflow:"auto" } },
+            readings.map((r, i) =>
+              React.createElement("div", {
+                key: i,
+                style: { display:"flex", justifyContent:"space-between", padding:"6px 0",
+                  borderBottom: i < readings.length - 1 ? `1px solid ${C.greyL}` : "none", fontSize:12 }
+              },
+                React.createElement("span", { style: { color:C.grey } },
+                  new Date(r.recorded_at).toLocaleTimeString()),
+                React.createElement("span", { style: { color:C.primary, fontWeight:600 } },
+                  `${r.soil_moisture_pct?.toFixed(0) ?? "--"}%`),
+                React.createElement("span", { style: { color:C.orange } },
+                  `${r.temperature_c?.toFixed(1) ?? "--"}\u00B0C`),
+                React.createElement("span", { style: { color: r.valve_open ? C.green : C.grey } },
+                  r.valve_open ? "Open" : "Closed")
+              )
+            )
+          )
+        ),
+
+        // Recent Watering Events
+        events.length > 0 && React.createElement(Card, null,
+          React.createElement("div", { style: { fontSize:14, fontWeight:600, color:C.dark, marginBottom:12 } },
+            `Watering Events (${events.length})`),
+          events.map((e, i) =>
+            React.createElement("div", {
+              key: i,
+              style: { padding:"8px 0", borderBottom: i < events.length - 1 ? `1px solid ${C.greyL}` : "none" }
+            },
+              React.createElement("div", { style: { display:"flex", justifyContent:"space-between", fontSize:13 } },
+                React.createElement("span", { style: { color:C.dark, fontWeight:500 } },
+                  new Date(e.started_at).toLocaleString()),
+                React.createElement("span", { style: { color:C.primary, fontWeight:600 } },
+                  e.duration_s ? `${Math.round(e.duration_s / 60)}m` : "...")
+              ),
+              React.createElement("div", { style: { fontSize:11, color:C.grey, marginTop:2 } },
+                `${e.trigger_type} \u2022 moisture: ${e.moisture_before?.toFixed(0) ?? "?"}% \u2192 ${e.moisture_after?.toFixed(0) ?? "?"}%`)
+            )
+          )
+        )
+      );
+    }
+
+    // ─── Dashboard Screen ───────────────────────────────────────
+    function DashboardScreen({ token, user, initialMac, onLogout }) {
+      const [nodes, setNodes] = useState([]);
+      const [loading, setLoading] = useState(true);
+      const [view, setView] = useState(initialMac ? "add" : "list");
+      const [selectedNode, setSelectedNode] = useState(null);
+
+      useEffect(() => {
+        if (view === "list") loadNodes();
+      }, [view]);
+
+      const loadNodes = async () => {
+        setLoading(true);
+        const data = await supabaseQuery("nodes",
+          `user_id=eq.${user.id}&order=created_at.desc`, token);
+        setNodes(Array.isArray(data) ? data : []);
+        setLoading(false);
+      };
+
+      if (view === "add") {
+        return React.createElement(AddNodeScreen, {
+          token, mac: initialMac,
+          onDone: () => { setView("list"); },
+          onCancel: () => setView("list")
+        });
+      }
+
+      if (view === "detail" && selectedNode) {
+        return React.createElement(NodeDetailScreen, {
+          node: selectedNode, token,
+          onBack: () => { setSelectedNode(null); setView("list"); }
+        });
+      }
+
+      return React.createElement("div", { style: { maxWidth:420, margin:"0 auto", padding:20, paddingTop:20 } },
+        // Header
+        React.createElement("div", { style: { display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:20 } },
+          React.createElement("div", null,
+            React.createElement("h1", { style: { fontSize:22, color:C.dark } }, "\uD83C\uDF31 IrrigValve"),
+            React.createElement("p", { style: { fontSize:12, color:C.grey } }, user.email)
+          ),
+          React.createElement("button", {
+            onClick: onLogout,
+            style: { padding:"6px 14px", borderRadius:8, border:`1px solid ${C.border}`,
+              background:C.card, color:C.grey, fontSize:12, cursor:"pointer" }
+          }, "Sign out")
+        ),
+
+        // Nodes list
+        loading
+          ? React.createElement("div", { style: { textAlign:"center", padding:40 } }, React.createElement(Spinner))
+          : nodes.length === 0
+            ? React.createElement(Card, { style: { textAlign:"center", padding:30 } },
+                React.createElement("div", { style: { fontSize:36, marginBottom:8 } }, "\uD83C\uDF35"),
+                React.createElement("p", { style: { color:C.grey, fontSize:14, marginBottom:16 } },
+                  "No valves registered yet."),
+                React.createElement(Button, { onClick: () => setView("add") }, "Add Your First Valve")
+              )
+            : React.createElement(React.Fragment, null,
+                nodes.map(n =>
+                  React.createElement(NodeCard, {
+                    key: n.id, node: n,
+                    onClick: () => { setSelectedNode(n); setView("detail"); }
+                  })
+                ),
+                React.createElement(Button, {
+                  onClick: () => setView("add"),
+                  style: { marginTop:8 }
+                }, "+ Add Another Valve")
+              )
+      );
+    }
+
+    // ─── Main App ───────────────────────────────────────────────
+    function App() {
+      // Parse URL params (mac from NFC/QR)
+      const params = new URLSearchParams(window.location.search);
+      const urlMac = params.get("mac") || "";
+
+      // Auth state
+      const [screen, setScreen] = useState("landing"); // landing | auth | dashboard
+      const [token, setToken] = useState(null);
+      const [user, setUser] = useState(null);
+
+      // Check for saved session
+      useEffect(() => {
+        try {
+          const saved = localStorage.getItem("irrigvalve_session");
+          if (saved) {
+            const session = JSON.parse(saved);
+            if (session.token && session.user) {
+              setToken(session.token);
+              setUser(session.user);
+              setScreen("dashboard");
+            }
+          }
+        } catch(e) {}
+      }, []);
+
+      const handleAuth = (accessToken, userData) => {
+        setToken(accessToken);
+        setUser(userData);
+        setScreen("dashboard");
+        try {
+          localStorage.setItem("irrigvalve_session", JSON.stringify({ token: accessToken, user: userData }));
+        } catch(e) {}
+      };
+
+      const handleLogout = () => {
+        setToken(null);
+        setUser(null);
+        setScreen("landing");
+        try { localStorage.removeItem("irrigvalve_session"); } catch(e) {}
+      };
+
+      const goLocal = () => {
+        // Redirect to the ESP32's local PWA
+        // Try mDNS first, fall back to asking for IP
+        const ip = prompt("Enter your valve's IP address to use local mode:\n\n(Check your router or the valve's display)");
+        if (ip) {
+          window.location.href = `http://${ip}/app`;
+        }
+      };
+
+      if (screen === "landing") {
+        return React.createElement(LandingScreen, {
+          mac: urlMac,
+          onCloud: () => setScreen("auth"),
+          onLocal: goLocal
+        });
+      }
+
+      if (screen === "auth") {
+        return React.createElement(AuthScreen, {
+          mac: urlMac,
+          onAuth: handleAuth
+        });
+      }
+
+      if (screen === "dashboard") {
+        return React.createElement(DashboardScreen, {
+          token, user,
+          initialMac: urlMac || null,
+          onLogout: handleLogout
+        });
+      }
+    }
+
+    ReactDOM.render(React.createElement(App), document.getElementById("root"));
+  </script>
+</body>
+</html>
