@@ -401,6 +401,17 @@
           )
         ),
 
+        // Direct Control button — uses irrigvalve-XXXX from last 4 hex of MAC
+        React.createElement(Button, {
+          onClick: () => {
+            const mac = node.device_mac.replace(/:/g, "").toLowerCase();
+            const suffix = mac.slice(-4);
+            window.open(`http://irrigvalve-${suffix}.local/app`, "_blank");
+          },
+          color: C.blue,
+          style: { marginBottom:16 }
+        }, "Direct Control"),
+
         // Current Status
         React.createElement(Card, null,
           React.createElement("div", { style: { fontSize:14, fontWeight:600, color:C.dark, marginBottom:12 } }, "Current Status"),
